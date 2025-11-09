@@ -1,15 +1,14 @@
 const config = {
-  password: "", // 管理面板使用密码 // if password != null, then use this config; otherwise, read password from KV.
-  result_page: false, // 是否用特定的result页面来显示value // After get the value from KV, if use a page to show the result.
-  theme: "", // 管理面板的主题 // Homepage theme, use the empty value for default theme. To use urlcool theme, please fill with "theme/urlcool" .
-  cors: true, // 是否允许CORS使用API // Allow Cross-origin resource sharing for API requests.
-  unique_link: false, // 一个长链是否只有唯一的短链(会增加写入的使用量) // If it is true, the same long url will be shorten into the same short url
-  custom_link: true, // 允许自定义短链 // Allow users to customize the short url.
-  overwrite_kv: false, // 允许覆盖已存在的key // Allow user to overwrite an existed key.
-  snapchat_mode: false, // 短链只能访问一次(访问后就删除了) // The link will be distroyed after access.
-  visit_count: false, // 使用记数(会大大增加写入的使用量, 多人共用不推荐打开) // Count visit times.
-  load_kv: false, // 从KV加载全部数据(自用推荐打开, 多人共用会看到别人的数据) // Load all from Cloudflare KV
-  system_type: "shorturl", // 系统的功能定义 // shorturl, imghost, other types {pastebin, journal}
+  result_page: false, // After get the value from KV, if use a page to show the result.
+  theme: "", // Homepage theme, use the empty value for default theme. To use urlcool theme, please fill with "theme/urlcool" .
+  cors: true, // Allow Cross-origin resource sharing for API requests.
+  unique_link: false, // If it is true, the same long url will be shorten into the same short url
+  custom_link: true, // Allow users to customize the short url.
+  overwrite_kv: true, // Allow user to overwrite an existed key.
+  snapchat_mode: false, // The link will be distroyed after access.
+  visit_count: false, // Count visit times.
+  load_kv: false, // Load all from Cloudflare KV
+  system_type: "shorturl", // shorturl, imghost, other types {pastebin, journal}
 }
 
 // key in protect_keylist can't read, add, del from UI and API
@@ -116,24 +115,12 @@ async function is_url_exist(url_sha512) {
   }
 }
 
-// 系统密码
-async function system_password() {
-  // 配置中的passoword为空 config.password is NULL
-  if (config.password.trim().length === 0 ) {    
-    // 查KV中的password对应的值 Query "password" in KV
-    return await LINKS.get("password");
-  }
-  else {
-    return config.password.trim();
-  }
-}
-
 async function handleRequest(request) {
   // console.log(request)
 
-  // 系统密码
-  const password_value  = await system_password();
-  
+  // 查KV中的password对应的值 Query "password" in KV
+  const password_value = await LINKS.get("password");
+
   /************************/
   // 以下是API接口的处理 Below is operation for API
 
@@ -160,7 +147,9 @@ async function handleRequest(request) {
     }
 
     if (req_cmd == "add") {
-      if ((config.system_type == "shorturl") && !await checkURL(req_url)) {
+      // 关键修改1：仅当系统类型是shorturl且要求unique_link时，才校验URL合法性
+      // 非URL内容（如纯文本）直接跳过校验，允许保存
+      if ((config.system_type === "shorturl") && config.unique_link && !await checkURL(req_url)) {
         return new Response(`{"status":500, "url": "` + req_url + `", "error":"Error: Url illegal."}`, {
           headers: response_header,
         })
@@ -299,50 +288,41 @@ async function handleRequest(request) {
   // 以下是浏览器直接访问worker页面的处理 Below is operation for browser visit worker page
 
   const requestURL = new URL(request.url)
-  let path = requestURL.pathname.split("/")[1]
-  path = decodeURIComponent(path);
-  const params = requestURL.search;
+  const pathSegments = requestURL.pathname.split("/").filter(segment => segment); // 分割路径并过滤空字符串
+  const params = requestURL.search; // 保留查询参数
 
-  // console.log(path)
-  // 如果path为空, 即直接访问本worker
-  // If visit this worker directly (no path)
-  if (!path) {
-    // return Response.redirect("https://zelikk.blogspot.com/search/label/Url-Shorten-Worker", 302)
-    // /* 
-    return new Response(html404, {
-      headers: response_header,
-      status: 404
-    }) 
-    // */
+  // 提取targetkey（第一个路径段）和后续子路径
+  let targetKey = pathSegments[0] || "";
+  targetKey = decodeURIComponent(targetKey);
+  const subPath = pathSegments.slice(1).join("/"); // 后续路径段拼接成子路径
+
+  // console.log("targetKey:", targetKey, "subPath:", subPath)
+
+  // 如果targetKey为空, 即直接访问本worker
+  if (!targetKey) {
+    return Response.redirect("https://github.com/crazypeace/Url-Shorten-Worker/", 302)
   }
 
-  // 如果path符合password 显示操作页面index.html
-  // if path equals password, return index.html
-  if (path == password_value) {
+  // 如果targetKey等于password，显示操作页面index.html
+  if (targetKey == password_value) {
     let index = await fetch(index_html)
     index = await index.text()
     index = index.replace(/__PASSWORD__/gm, password_value)
-    // 操作页面文字修改
-    // index = index.replace(/短链系统变身/gm, "")
     return new Response(index, {
       headers: response_header,
     })
   }
 
-  // 在KV中查询 短链接 对应的原链接
-  // Query the value(long url) in KV by key(short url)
-  let value = await LINKS.get(path);
-  // console.log(value)
+  // 在KV中查询targetKey对应的原链接
+  let value = await LINKS.get(targetKey);
 
-  // 如果path是'password', 让查询结果为空, 不然直接就把password查出来了
-  // Protect password. If path equals 'password', set result null
-  if (protect_keylist.includes(path)) {
+  // 保护敏感key，不允许访问
+  if (protect_keylist.includes(targetKey)) {
     value = ""
   }
 
   if (!value) {
-    // KV中没有数据, 返回404
-    // If request not in KV, return 404
+    // KV中没有对应数据, 返回404
     return new Response(html404, {
       headers: response_header,
       status: 404
@@ -351,55 +331,55 @@ async function handleRequest(request) {
 
   // 计数功能
   if (config.visit_count) {
-    // 获取并增加访问计数
-    let count = await LINKS.get(path + "-count");
+    let count = await LINKS.get(targetKey + "-count");
     if (count === null) {
-      await LINKS.put(path + "-count", "1"); // 初始化为1，因为这是首次访问
+      await LINKS.put(targetKey + "-count", "1");
     } else {
       count = parseInt(count) + 1;
-      await LINKS.put(path + "-count", count.toString());
+      await LINKS.put(targetKey + "-count", count.toString());
     }
   }
 
-  // 如果阅后即焚模式
+  // 阅后即焚模式
   if (config.snapchat_mode) {
-    // 删除KV中的记录
-    // Remove record before jump to long url
-    await LINKS.delete(path)
+    await LINKS.delete(targetKey)
   }
 
-  // 带上参数部分, 拼装要跳转的最终网址
-  // URL to jump finally
+  // 拼装最终访问地址：原链接 + 子路径 + 查询参数
+  let finalUrl = value;
+  // 处理子路径（如果有）
+  if (subPath) {
+    // 确保原链接末尾没有多余的斜杠，子路径开头也没有
+    finalUrl = finalUrl.replace(/\/$/, "") + "/" + subPath.replace(/^\//, "");
+  }
+  // 拼接查询参数（如果有）
   if (params) {
-    value = value + params
+    finalUrl += params;
   }
 
   // 如果自定义了结果页面
   if (config.result_page) {
     let result_page_html = await fetch(result_html)
     let result_page_html_text = await result_page_html.text()      
-    result_page_html_text = result_page_html_text.replace(/{__FINAL_LINK__}/gm, value)
+    result_page_html_text = result_page_html_text.replace(/{__FINAL_LINK__}/gm, finalUrl)
     return new Response(result_page_html_text, {
       headers: response_header,
     })
   } 
 
-  // 以下是不使用自定义结果页面的处理
-  // 作为一个短链系统, 需要跳转
-  if (config.system_type == "shorturl") {
-    return Response.redirect(value, 302)
-  } else if (config.system_type == "imghost") {
-    // 如果是图床      
+  // 跳转或返回内容
+  const isUrl = await checkURL(value); // 这里校验原始存储的value是否为URL，而非拼接后的finalUrl
+  if (config.system_type === "shorturl" && isUrl) {
+    return Response.redirect(finalUrl, 302)
+  } else if (config.system_type === "imghost") {
     var blob = base64ToBlob(value)
     return new Response(blob, {
-      // 图片不能指定content-type为 text/plain
+      // 图片类型由blob自动处理
     })
   } else {
-    // 如果只是一个单纯的key-value系统, 简单的显示value就行了
+    // 非URL内容返回纯文本
     return new Response(value, {
-      headers: {
-          "Content-type": "text/plain;charset=UTF-8;",
-        },
+      headers: { "Content-type": "text/plain;charset=UTF-8" },
     })
   }
 }
